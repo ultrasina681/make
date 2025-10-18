@@ -108,7 +108,8 @@ void exit(int code) {
 }
 
 // Android entry point - EXPORT THIS
-extern "C" __attribute__((visibility("default")))
+// NO "extern C" - we're already in a C file!
+__attribute__((visibility("default")))
 int make_android_main(int argc, char **argv, char **envp) {
     if (setjmp(make_exit_jmpbuf) == 0) {
         return main(argc, argv, envp);
