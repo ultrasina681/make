@@ -93,6 +93,30 @@ double atof ();
 #include "getopt.h"
 #include "shuffle.h"
 #include "warning.h"
+// ========== ADD THIS BLOCK ==========
+#ifdef ANDROID_BUILD
+#include <setjmp.h>
+
+static jmp_buf make_exit_jmpbuf;
+static int make_exit_code = 0;
+
+// Override exit() to longjmp instead
+void exit(int code) {
+    make_exit_code = code;
+    longjmp(make_exit_jmpbuf, 1);
+    __builtin_unreachable();
+}
+
+// Android entry point - EXPORT THIS
+extern "C" __attribute__((visibility("default")))
+int make_android_main(int argc, char **argv, char **envp) {
+    if (setjmp(make_exit_jmpbuf) == 0) {
+        return main(argc, argv, envp);
+    }
+    return make_exit_code;
+}
+#endif
+// ========== END BLOCK ==========
 
 static void clean_jobserver (int status);
 static void print_data_base (void);
