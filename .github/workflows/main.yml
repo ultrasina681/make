@@ -62,34 +62,8 @@ jobs:
         sed -i 's/alt_start = mempcpy (onealt, pattern, begin - pattern);/memcpy(onealt, pattern, begin - pattern); alt_start = onealt + (begin - pattern);/g' lib/glob.c
         sed -i '/^extern char \*getenv ();/d' lib/fnmatch.c
         
-        # Fix extern "C" in C file
-        sed -i 's/extern "C" __attribute__/__attribute__/g' src/main.c
-        
-        # Patch job.c - disable posix_spawn, use fork/exec fallback
-        cat > /tmp/job_patch.txt << 'EOF'
-        --- a/src/job.c
-        +++ b/src/job.c
-        @@ -2419,7 +2419,7 @@
-                   dp = xmalloc (l);
-                   confstr (_CS_PATH, dp, l);
-                 }
-        -#endif
-        +#elif 0
-               /* These are the same regardless.  */
-               posix_spawnattr_init (&attr);
-        EOF
-        
-        # Simpler: just disable the posix_spawn code path entirely
+        # Disable posix_spawn (bionic doesn't support it well)
         sed -i 's/#if HAVE_POSIX_SPAWN/#if 0 \&\& HAVE_POSIX_SPAWN/g' src/job.c
-        
-        # Fix main.c - remove forward declaration of main
-        sed -i '/^[[:space:]]*return main(argc, argv, envp);/d' src/main.c
-        # Add a proper implementation
-        sed -i '/__attribute__((visibility("default")))/a\
-        int make_android_main(int argc, char **argv, char **envp) {\
-            extern int main(int, char **, char **);\
-            return main(argc, argv, envp);\
-        }' src/main.c
 
     - name: Configure for Android
       run: |
@@ -118,7 +92,7 @@ jobs:
           CFLAGS="$CFLAGS" \
           LDFLAGS="$LDFLAGS"
 
-    - name: Patch Makefile (remove all clang-incompatible flags)
+    - name: Patch Makefile (remove clang-incompatible flags)
       run: |
         find . -name 'Makefile' -exec sed -i 's/-Wduplicated-cond//g' {} +
         find . -name 'Makefile' -exec sed -i 's/-Wlogical-op//g' {} +
@@ -162,23 +136,23 @@ jobs:
         
         mkdir -p output/${{ matrix.abi }}
         
-        echo "Checking page alignment..."
-        $TOOLCHAIN/bin/llvm-readelf -l src/libmake-android.so | grep LOAD || true
+        echo "=== Checking 16KB page alignment ==="
+        $TOOLCHAIN/bin/llvm-readelf -l src/libmake-android.so | grep LOAD
         
-        echo "Checking exported symbols..."
+        echo "=== Checking exported symbols ==="
         $TOOLCHAIN/bin/llvm-nm -D src/libmake-android.so | grep make_android_main
         
         if [ $? -ne 0 ]; then
           echo "ERROR: make_android_main not exported!"
           echo "All exported symbols:"
-          $TOOLCHAIN/bin/llvm-nm -D src/libmake-android.so
+          $TOOLCHAIN/bin/llvm-nm -D src/libmake-android.so | head -20
           exit 1
         fi
         
         cp src/libmake-android.so output/${{ matrix.abi }}/
         $TOOLCHAIN/bin/llvm-strip output/${{ matrix.abi }}/libmake-android.so
         
-        echo "Final library info:"
+        echo "=== Final library info ==="
         ls -lh output/${{ matrix.abi }}/
         file output/${{ matrix.abi }}/libmake-android.so
 
