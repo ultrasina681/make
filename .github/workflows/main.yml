@@ -1,0 +1,160 @@
+name: Build GNU Make for Android
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ master ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch:
+          - { abi: arm64-v8a, triple: aarch64-linux-android, api: 21 }
+          - { abi: armeabi-v7a, triple: armv7a-linux-androideabi, api: 21 }
+          - { abi: x86_64, triple: x86_64-linux-android, api: 21 }
+          - { abi: x86, triple: i686-linux-android, api: 21 }
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Setup NDK
+      uses: nttld/setup-ndk@v1
+      with:
+        ndk-version: r27d
+        add-to-path: true
+
+    - name: Install build tools
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y autoconf automake texinfo gettext pkg-config
+
+    - name: Bootstrap (host build first)
+      run: |
+        # GNU Make needs to build itself, so build for host first
+        ./bootstrap
+        ./configure
+        make -j$(nproc)
+        sudo make install
+        make clean
+
+    - name: Configure for Android
+      run: |
+        export TOOLCHAIN=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64
+        export CC="$TOOLCHAIN/bin/${{ matrix.arch.triple }}${{ matrix.arch.api }}-clang"
+        export CXX="$TOOLCHAIN/bin/${{ matrix.arch.triple }}${{ matrix.arch.api }}-clang++"
+        export AR="$TOOLCHAIN/bin/llvm-ar"
+        export RANLIB="$TOOLCHAIN/bin/llvm-ranlib"
+        export STRIP="$TOOLCHAIN/bin/llvm-strip"
+        
+        ./bootstrap
+        
+        ./configure \
+          --host=${{ matrix.arch.triple }} \
+          --disable-nls \
+          --without-guile \
+          CFLAGS="-O2 -DANDROID_BUILD -fPIC -ffunction-sections -fdata-sections" \
+          LDFLAGS="-shared -Wl,-soname,libmake-android.so -Wl,--gc-sections"
+
+    - name: Patch Makefile for shared library
+      run: |
+        # Modify the build to create a shared library instead of executable
+        sed -i 's/^make:/libmake-android.so:/' src/Makefile
+        sed -i 's/\$(LINK.c)/\$(CC) -shared/' src/Makefile
+        
+        # Ensure make_android_main is exported
+        echo "Patching for Android entry point..."
+
+    - name: Build
+      run: |
+        export TOOLCHAIN=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64
+        export CC="$TOOLCHAIN/bin/${{ matrix.arch.triple }}${{ matrix.arch.api }}-clang"
+        export CXX="$TOOLCHAIN/bin/${{ matrix.arch.triple }}${{ matrix.arch.api }}-clang++"
+        export AR="$TOOLCHAIN/bin/llvm-ar"
+        export RANLIB="$TOOLCHAIN/bin/llvm-ranlib"
+        
+        make -j$(nproc)
+        
+        # Create the shared library manually if needed
+        if [ ! -f src/libmake-android.so ]; then
+          echo "Creating shared library manually..."
+          cd src
+          $CC -shared -o libmake-android.so \
+            *.o \
+            -Wl,-soname,libmake-android.so \
+            -Wl,--gc-sections \
+            -lm -ldl -llog
+          cd ..
+        fi
+
+    - name: Strip and package
+      run: |
+        export TOOLCHAIN=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64
+        
+        mkdir -p output/${{ matrix.arch.abi }}
+        
+        if [ -f src/libmake-android.so ]; then
+          cp src/libmake-android.so output/${{ matrix.arch.abi }}/
+        elif [ -f src/make ]; then
+          # If it built as executable, convert it
+          $TOOLCHAIN/bin/${{ matrix.arch.triple }}${{ matrix.arch.api }}-clang \
+            -shared -o output/${{ matrix.arch.abi }}/libmake-android.so \
+            src/*.o \
+            -Wl,-soname,libmake-android.so \
+            -lm -ldl -llog
+        fi
+        
+        $TOOLCHAIN/bin/llvm-strip output/${{ matrix.arch.abi }}/libmake-android.so
+        
+        # Verify exported symbols
+        $TOOLCHAIN/bin/llvm-readelf -s output/${{ matrix.arch.abi }}/libmake-android.so | grep make_android_main || \
+          echo "WARNING: make_android_main not found in exports!"
+        
+        ls -lh output/${{ matrix.arch.abi }}/
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: libmake-android-${{ matrix.arch.abi }}
+        path: output/${{ matrix.arch.abi }}/libmake-android.so
+
+  package:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: artifacts
+
+    - name: Create release package
+      run: |
+        mkdir -p release/jniLibs/{arm64-v8a,armeabi-v7a,x86_64,x86}
+        
+        cp artifacts/libmake-android-arm64-v8a/libmake-android.so release/jniLibs/arm64-v8a/
+        cp artifacts/libmake-android-armeabi-v7a/libmake-android.so release/jniLibs/armeabi-v7a/
+        cp artifacts/libmake-android-x86_64/libmake-android.so release/jniLibs/x86_64/
+        cp artifacts/libmake-android-x86/libmake-android.so release/jniLibs/x86/
+        
+        cd release
+        tar -czf ../libmake-android-all.tar.gz jniLibs/
+        cd ..
+        
+        echo "### Build Summary" > summary.txt
+        echo "" >> summary.txt
+        for arch in arm64-v8a armeabi-v7a x86_64 x86; do
+          size=$(stat -f%z "release/jniLibs/$arch/libmake-android.so" 2>/dev/null || stat -c%s "release/jniLibs/$arch/libmake-android.so")
+          echo "- $arch: $(numfmt --to=iec-i --suffix=B $size)" >> summary.txt
+        done
+        
+        cat summary.txt
+
+    - name: Upload release package
+      uses: actions/upload-artifact@v4
+      with:
+        name: libmake-android-all-architectures
+        path: |
+          libmake-android-all.tar.gz
+          summary.txt
