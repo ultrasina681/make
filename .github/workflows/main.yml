@@ -52,23 +52,6 @@ jobs:
         sed -i 's/eaccess/access/g' lib/findprog-in.c
         
         # Patch glob.c - replace mempcpy with memcpy equivalent
-        cat > /tmp/glob.patch << 'EOF'
-        --- a/lib/glob.c
-        +++ b/lib/glob.c
-        @@ -314,7 +314,9 @@
-                   size_t restlen = end - rest + 1;
-                   char *onealt = malloc (restlen + depth);
-                   if (onealt == NULL)
-        -          alt_start = mempcpy (onealt, pattern, begin - pattern);
-        +          {
-        +            memcpy(onealt, pattern, begin - pattern);
-        +            alt_start = onealt + (begin - pattern);
-        EOF
-        
-        # Apply the patch
-        patch -p1 < /tmp/glob.patch || echo "Patch failed, trying sed..."
-        
-        # Alternative: use sed if patch fails
         sed -i 's/alt_start = mempcpy (onealt, pattern, begin - pattern);/memcpy(onealt, pattern, begin - pattern); alt_start = onealt + (begin - pattern);/g' lib/glob.c
         
         # Patch fnmatch.c - remove conflicting getenv declaration
@@ -83,6 +66,7 @@ jobs:
         export RANLIB="$TOOLCHAIN/bin/llvm-ranlib"
         export STRIP="$TOOLCHAIN/bin/llvm-strip"
         
+        # Remove GCC-specific flags that clang doesn't support
         export CFLAGS="-O2 -DANDROID_BUILD -fPIC -ffunction-sections -fdata-sections -Wno-deprecated-non-prototype"
         export LDFLAGS="-shared \
           -Wl,-soname,libmake-android.so \
@@ -93,14 +77,32 @@ jobs:
         
         ./bootstrap
         
+        # Disable maintainer mode to avoid -Werror and -C flags
         ./configure \
           --host=${{ matrix.arch.triple }} \
           --disable-nls \
           --without-guile \
+          --disable-maintainer-mode \
           ac_cv_func_eaccess=no \
           ac_cv_func_mempcpy=no \
           CFLAGS="$CFLAGS" \
           LDFLAGS="$LDFLAGS"
+
+    - name: Patch Makefile (remove clang-incompatible flags)
+      run: |
+        # Remove -C flag (GCC preprocessor flag not supported by clang)
+        sed -i 's/ -C / /g' Makefile
+        sed -i 's/ -Wlogical-op / /g' Makefile
+        sed -i 's/ -Wduplicated-cond / /g' Makefile
+        sed -i 's/ -Wformat-signedness / /g' Makefile
+        
+        # Also remove from src/Makefile if it exists
+        if [ -f src/Makefile ]; then
+          sed -i 's/ -C / /g' src/Makefile
+          sed -i 's/ -Wlogical-op / /g' src/Makefile
+          sed -i 's/ -Wduplicated-cond / /g' src/Makefile
+          sed -i 's/ -Wformat-signedness / /g' src/Makefile
+        fi
 
     - name: Build
       run: |
@@ -113,6 +115,13 @@ jobs:
         
         echo "Building shared library..."
         cd src
+        
+        # Collect all object files
+        OBJS=$(ls *.o 2>/dev/null || echo "")
+        if [ -z "$OBJS" ]; then
+          echo "ERROR: No object files found!"
+          exit 1
+        fi
         
         $CC -shared -o libmake-android.so \
           *.o ../lib/libgnu.a \
@@ -136,11 +145,12 @@ jobs:
         $TOOLCHAIN/bin/llvm-readelf -l src/libmake-android.so | grep LOAD || true
         
         echo "Checking exported symbols..."
-        $TOOLCHAIN/bin/llvm-readelf -s src/libmake-android.so | grep make_android_main
+        $TOOLCHAIN/bin/llvm-nm -D src/libmake-android.so | grep make_android_main
         
         if [ $? -ne 0 ]; then
           echo "ERROR: make_android_main not exported!"
-          $TOOLCHAIN/bin/llvm-nm -D src/libmake-android.so | grep -i main
+          echo "All exported symbols:"
+          $TOOLCHAIN/bin/llvm-nm -D src/libmake-android.so
           exit 1
         fi
         
