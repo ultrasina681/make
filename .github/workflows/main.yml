@@ -60,6 +60,9 @@ jobs:
         sed -i 's/eaccess/access/g' lib/findprog-in.c
         sed -i 's/alt_start = mempcpy (onealt, pattern, begin - pattern);/memcpy(onealt, pattern, begin - pattern); alt_start = onealt + (begin - pattern);/g' lib/glob.c
         sed -i '/^extern char \*getenv ();/d' lib/fnmatch.c
+        
+        # Fix C++ extern linkage
+        sed -i 's/extern "C" __attribute__/__attribute__/g' src/main.c
 
     - name: Configure for Android
       run: |
@@ -70,7 +73,7 @@ jobs:
         export RANLIB="$TOOLCHAIN/bin/llvm-ranlib"
         export STRIP="$TOOLCHAIN/bin/llvm-strip"
         
-        export CFLAGS="-O2 -DANDROID_BUILD -fPIC -ffunction-sections -fdata-sections -Wno-deprecated-non-prototype -Wno-unknown-warning-option"
+        export CFLAGS="-O2 -DANDROID_BUILD -fPIC -ffunction-sections -fdata-sections -Wno-deprecated-non-prototype -Wno-unknown-warning-option -Wno-string-compare"
         export LDFLAGS="-shared -Wl,-soname,libmake-android.so -Wl,--gc-sections -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384 -Wl,--hash-style=gnu"
         export GNULIB_WARN_CFLAGS=""
         export WARN_CFLAGS=""
@@ -93,6 +96,7 @@ jobs:
         find . -name 'Makefile' -exec sed -i 's/-Wlogical-op//g' {} +
         find . -name 'Makefile' -exec sed -i 's/-Wformat-signedness//g' {} +
         find . -name 'Makefile' -exec sed -i 's/ -C / /g' {} +
+        find . -name 'Makefile' -exec sed -i 's/-Werror/-Wno-error/g' {} +
 
     - name: Build
       run: |
@@ -101,7 +105,7 @@ jobs:
         export AR="$TOOLCHAIN/bin/llvm-ar"
         export RANLIB="$TOOLCHAIN/bin/llvm-ranlib"
         
-        make -j$(nproc) V=1 WARN_CFLAGS="" GNULIB_WARN_CFLAGS=""
+        make -j$(nproc) V=1 WARN_CFLAGS="" GNULIB_WARN_CFLAGS="" CFLAGS="-O2 -DANDROID_BUILD -fPIC -ffunction-sections -fdata-sections -Wno-deprecated-non-prototype -Wno-unknown-warning-option -Wno-string-compare -Wno-error"
         
         echo "Building shared library..."
         cd src
