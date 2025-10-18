@@ -29,7 +29,14 @@ jobs:
     - name: Install build tools
       run: |
         sudo apt-get update
-        sudo apt-get install -y autoconf automake texinfo gettext pkg-config
+        sudo apt-get install -y \
+          autoconf \
+          automake \
+          autopoint \
+          texinfo \
+          gettext \
+          pkg-config \
+          libtool
 
     - name: Bootstrap (host build first)
       run: |
@@ -38,7 +45,7 @@ jobs:
         ./configure
         make -j$(nproc)
         sudo make install
-        make clean
+        make distclean || make clean
 
     - name: Configure for Android
       run: |
@@ -49,70 +56,75 @@ jobs:
         export RANLIB="$TOOLCHAIN/bin/llvm-ranlib"
         export STRIP="$TOOLCHAIN/bin/llvm-strip"
         
+        # Set flags with 16KB page alignment for Android 15+
+        export CFLAGS="-O2 -DANDROID_BUILD -fPIC -ffunction-sections -fdata-sections"
+        export LDFLAGS="-shared \
+          -Wl,-soname,libmake-android.so \
+          -Wl,--gc-sections \
+          -Wl,-z,max-page-size=16384 \
+          -Wl,-z,common-page-size=16384 \
+          -Wl,--hash-style=gnu"
+        
         ./bootstrap
         
         ./configure \
           --host=${{ matrix.arch.triple }} \
           --disable-nls \
           --without-guile \
-          CFLAGS="-O2 -DANDROID_BUILD -fPIC -ffunction-sections -fdata-sections" \
-          LDFLAGS="-shared -Wl,-soname,libmake-android.so -Wl,--gc-sections"
-
-    - name: Patch Makefile for shared library
-      run: |
-        # Modify the build to create a shared library instead of executable
-        sed -i 's/^make:/libmake-android.so:/' src/Makefile
-        sed -i 's/\$(LINK.c)/\$(CC) -shared/' src/Makefile
-        
-        # Ensure make_android_main is exported
-        echo "Patching for Android entry point..."
+          CFLAGS="$CFLAGS" \
+          LDFLAGS="$LDFLAGS"
 
     - name: Build
       run: |
         export TOOLCHAIN=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64
         export CC="$TOOLCHAIN/bin/${{ matrix.arch.triple }}${{ matrix.arch.api }}-clang"
-        export CXX="$TOOLCHAIN/bin/${{ matrix.arch.triple }}${{ matrix.arch.api }}-clang++"
         export AR="$TOOLCHAIN/bin/llvm-ar"
         export RANLIB="$TOOLCHAIN/bin/llvm-ranlib"
         
         make -j$(nproc)
         
-        # Create the shared library manually if needed
-        if [ ! -f src/libmake-android.so ]; then
-          echo "Creating shared library manually..."
-          cd src
-          $CC -shared -o libmake-android.so \
-            *.o \
-            -Wl,-soname,libmake-android.so \
-            -Wl,--gc-sections \
-            -lm -ldl -llog
-          cd ..
-        fi
+        # Create shared library from the built objects
+        echo "Building shared library..."
+        cd src
+        
+        $CC -shared -o libmake-android.so \
+          *.o \
+          -Wl,-soname,libmake-android.so \
+          -Wl,--gc-sections \
+          -Wl,-z,max-page-size=16384 \
+          -Wl,-z,common-page-size=16384 \
+          -Wl,--hash-style=gnu \
+          -Wl,--build-id=sha1 \
+          -lm -ldl -llog
+        
+        cd ..
 
-    - name: Strip and package
+    - name: Verify and strip
       run: |
         export TOOLCHAIN=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64
         
         mkdir -p output/${{ matrix.arch.abi }}
         
-        if [ -f src/libmake-android.so ]; then
-          cp src/libmake-android.so output/${{ matrix.arch.abi }}/
-        elif [ -f src/make ]; then
-          # If it built as executable, convert it
-          $TOOLCHAIN/bin/${{ matrix.arch.triple }}${{ matrix.arch.api }}-clang \
-            -shared -o output/${{ matrix.arch.abi }}/libmake-android.so \
-            src/*.o \
-            -Wl,-soname,libmake-android.so \
-            -lm -ldl -llog
+        # Verify 16KB alignment
+        echo "Checking page alignment..."
+        $TOOLCHAIN/bin/llvm-readelf -l src/libmake-android.so | grep LOAD || true
+        
+        # Verify exported symbol
+        echo "Checking exported symbols..."
+        $TOOLCHAIN/bin/llvm-readelf -s src/libmake-android.so | grep make_android_main
+        
+        if [ $? -ne 0 ]; then
+          echo "ERROR: make_android_main not exported!"
+          exit 1
         fi
         
+        # Strip and copy
+        cp src/libmake-android.so output/${{ matrix.arch.abi }}/
         $TOOLCHAIN/bin/llvm-strip output/${{ matrix.arch.abi }}/libmake-android.so
         
-        # Verify exported symbols
-        $TOOLCHAIN/bin/llvm-readelf -s output/${{ matrix.arch.abi }}/libmake-android.so | grep make_android_main || \
-          echo "WARNING: make_android_main not found in exports!"
-        
+        echo "Final library info:"
         ls -lh output/${{ matrix.arch.abi }}/
+        file output/${{ matrix.arch.abi }}/libmake-android.so
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4
@@ -145,8 +157,9 @@ jobs:
         echo "### Build Summary" > summary.txt
         echo "" >> summary.txt
         for arch in arm64-v8a armeabi-v7a x86_64 x86; do
-          size=$(stat -f%z "release/jniLibs/$arch/libmake-android.so" 2>/dev/null || stat -c%s "release/jniLibs/$arch/libmake-android.so")
-          echo "- $arch: $(numfmt --to=iec-i --suffix=B $size)" >> summary.txt
+          size=$(stat -c%s "release/jniLibs/$arch/libmake-android.so" 2>/dev/null || echo "0")
+          size_mb=$(echo "scale=2; $size/1024/1024" | bc)
+          echo "- $arch: ${size_mb}MB ($size bytes)" >> summary.txt
         done
         
         cat summary.txt
